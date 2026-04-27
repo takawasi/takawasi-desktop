@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self' 'unsafe-inline' data: blob:;
+           script-src 'self' 'unsafe-inline';
+           connect-src 'self' https://*.takawasi-social.com wss://*.takawasi-social.com;
+           style-src 'self' 'unsafe-inline';
+           img-src 'self' data: https:;
+           frame-src https://*.takawasi-social.com;">
+<title>Takawasi Desktop</title>
+<link rel="stylesheet" href="styles.css">
+<!-- xterm.js CSS from node_modules (served as file:// in dev, bundled in dist) -->
+<link rel="stylesheet" href="../node_modules/xterm/css/xterm.css">
+</head>
+<body>
+
+<!-- Header -->
+<header id="header">
+  <div id="header-logo">takawasi</div>
+  <nav id="header-nav">
+    <button id="btn-services" class="nav-btn active" data-panel="services">サービス</button>
+    <button id="btn-tba" class="nav-btn" data-panel="tba">TBA チャット</button>
+    <button id="btn-launchpad" class="nav-btn" data-panel="launchpad">LaunchPad</button>
+  </nav>
+  <div id="header-auth">
+    <span id="auth-status">未ログイン</span>
+    <button id="btn-login" class="auth-btn">ログイン</button>
+    <button id="btn-logout" class="auth-btn hidden">ログアウト</button>
+  </div>
+</header>
+
+<!-- Main: 3 panel top + terminal bottom -->
+<div id="main-layout">
+  <!-- Top panels row -->
+  <div id="panels-row">
+    <!-- Panel: Service WebView -->
+    <div id="panel-services" class="panel active">
+      <div class="panel-header">
+        <span class="panel-title">サービス</span>
+        <select id="service-select" class="service-select">
+          <option value="https://takawasi-social.com">Portal</option>
+          <option value="https://novelforge.takawasi-social.com">NovelForge</option>
+          <option value="https://articleforge.takawasi-social.com">ArticleForge</option>
+          <option value="https://budgetcode.takawasi-social.com">BudgetCode</option>
+          <option value="https://si.takawasi-social.com">SI</option>
+          <option value="https://memforge.takawasi-social.com">MemForge</option>
+          <option value="https://launchpad.takawasi-social.com">LaunchPad</option>
+        </select>
+      </div>
+      <webview id="wv-services"
+        src="https://takawasi-social.com"
+        partition="persist:takawasi"
+        allowpopups
+        class="panel-webview">
+      </webview>
+    </div>
+
+    <!-- Resizer between panel-services and panel-tba -->
+    <div class="resizer" data-direction="h" id="resizer-1"></div>
+
+    <!-- Panel: TBA Chat -->
+    <div id="panel-tba" class="panel">
+      <div class="panel-header">
+        <span class="panel-title">TBA チャット</span>
+        <span id="tba-stage-label" class="stage-label"></span>
+      </div>
+      <div id="tba-messages" class="tba-messages"></div>
+      <div id="tba-input-area" class="tba-input-area">
+        <textarea id="tba-input" class="tba-input" placeholder="やりたいことを入力... (Shift+Enter で改行、Enter で送信)" rows="3"></textarea>
+        <button id="tba-send" class="btn-send">送信</button>
+      </div>
+    </div>
+
+    <!-- Resizer between panel-tba and panel-launchpad -->
+    <div class="resizer" data-direction="h" id="resizer-2"></div>
+
+    <!-- Panel: LaunchPad Preview -->
+    <div id="panel-launchpad" class="panel">
+      <div class="panel-header">
+        <span class="panel-title">LaunchPad</span>
+        <button id="btn-lp-refresh" class="icon-btn" title="更新">&#8635;</button>
+      </div>
+      <div id="lp-list" class="lp-list">
+        <div class="lp-placeholder">ログイン後に生成物が表示されます</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Resizer between panels-row and terminal -->
+  <div class="resizer" data-direction="v" id="resizer-v"></div>
+
+  <!-- Terminal -->
+  <div id="terminal-panel">
+    <div class="panel-header">
+      <span class="panel-title">ターミナル</span>
+      <span class="panel-hint">takawasi-cli が PATH に含まれています</span>
+    </div>
+    <div id="terminal-container"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
