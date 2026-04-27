@@ -14,94 +14,149 @@
            base-uri 'none';
            form-action 'none';">
 <title>Takawasi Desktop</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="dockview.css">
 <link rel="stylesheet" href="xterm.css">
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
-<!-- Header -->
-<header id="header">
-  <div id="header-logo">takawasi</div>
-  <nav id="header-nav">
-    <button id="btn-services" class="nav-btn active" data-panel="services">サービス</button>
-    <button id="btn-tba" class="nav-btn" data-panel="tba">TBA チャット</button>
-    <button id="btn-launchpad" class="nav-btn" data-panel="launchpad">LaunchPad</button>
-  </nav>
-  <div id="header-auth">
-    <span id="auth-status">未ログイン</span>
-    <button id="btn-login" class="auth-btn">ログイン</button>
-    <button id="btn-logout" class="auth-btn hidden">ログアウト</button>
-  </div>
-</header>
-
-<!-- Main: 3 panel top + terminal bottom -->
-<div id="main-layout">
-  <!-- Top panels row -->
-  <div id="panels-row">
-    <!-- Panel: Service WebView -->
-    <div id="panel-services" class="panel active">
-      <div class="panel-header">
-        <span class="panel-title">サービス</span>
-        <select id="service-select" class="service-select">
-          <option value="https://takawasi-social.com">Portal</option>
-          <option value="https://novelforge.takawasi-social.com">NovelForge</option>
-          <option value="https://articleforge.takawasi-social.com">ArticleForge</option>
-          <option value="https://budgetcode.takawasi-social.com">BudgetCode</option>
-          <option value="https://si.takawasi-social.com">SI</option>
-          <option value="https://memforge.takawasi-social.com">MemForge</option>
-          <option value="https://launchpad.takawasi-social.com">LaunchPad</option>
-        </select>
-      </div>
-      <webview id="wv-services"
-        src="https://takawasi-social.com"
-        partition="persist:takawasi"
-        webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
-        class="panel-webview">
-      </webview>
+<!-- Activity Bar (VSCode-like left icon column) -->
+<div id="activity-bar">
+  <div id="activity-bar-top">
+    <!-- Logo / brand at top -->
+    <div id="activity-logo" title="takawasi">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <path d="M12 8v4l3 3"/>
+      </svg>
     </div>
 
-    <!-- Resizer between panel-services and panel-tba -->
-    <div class="resizer" data-direction="h" id="resizer-1"></div>
+    <!-- Services panel -->
+    <button class="activity-item" data-panel="services" title="サービス" aria-label="サービス">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2"/>
+        <line x1="8" y1="21" x2="16" y2="21"/>
+        <line x1="12" y1="17" x2="12" y2="21"/>
+      </svg>
+    </button>
 
-    <!-- Panel: TBA Chat -->
-    <div id="panel-tba" class="panel">
-      <div class="panel-header">
-        <span class="panel-title">TBA チャット</span>
-        <span id="tba-stage-label" class="stage-label"></span>
-      </div>
-      <div id="tba-messages" class="tba-messages"></div>
-      <div id="tba-input-area" class="tba-input-area">
-        <textarea id="tba-input" class="tba-input" placeholder="やりたいことを入力... (Shift+Enter で改行、Enter で送信)" rows="3"></textarea>
-        <button id="tba-send" class="btn-send">送信</button>
-      </div>
-    </div>
+    <!-- TBA Chat panel -->
+    <button class="activity-item" data-panel="tba" title="TBA チャット" aria-label="TBA チャット">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      </svg>
+    </button>
 
-    <!-- Resizer between panel-tba and panel-launchpad -->
-    <div class="resizer" data-direction="h" id="resizer-2"></div>
+    <!-- LaunchPad panel -->
+    <button class="activity-item" data-panel="launchpad" title="LaunchPad" aria-label="LaunchPad">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+    </button>
 
-    <!-- Panel: LaunchPad Preview -->
-    <div id="panel-launchpad" class="panel">
-      <div class="panel-header">
-        <span class="panel-title">LaunchPad</span>
-        <button id="btn-lp-refresh" class="icon-btn" title="更新">&#8635;</button>
-      </div>
-      <div id="lp-list" class="lp-list">
-        <div class="lp-placeholder">ログイン後に生成物が表示されます</div>
-      </div>
-    </div>
+    <!-- Terminal panel -->
+    <button class="activity-item" data-panel="terminal" title="ターミナル" aria-label="ターミナル">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="4 17 10 11 4 5"/>
+        <line x1="12" y1="19" x2="20" y2="19"/>
+      </svg>
+    </button>
   </div>
 
-  <!-- Resizer between panels-row and terminal -->
-  <div class="resizer" data-direction="v" id="resizer-v"></div>
+  <div id="activity-bar-bottom">
+    <!-- Settings -->
+    <button class="activity-item" id="activity-settings" title="設定" aria-label="設定">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
 
-  <!-- Terminal -->
-  <div id="terminal-panel">
-    <div class="panel-header">
-      <span class="panel-title">ターミナル</span>
-      <span class="panel-hint">takawasi-cli が PATH に含まれています</span>
-    </div>
-    <div id="terminal-container"></div>
+    <!-- Auth -->
+    <button class="activity-item" id="activity-auth" title="ログイン" aria-label="ログイン">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="icon-auth">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+        <circle cx="12" cy="7" r="4"/>
+      </svg>
+    </button>
   </div>
+</div>
+
+<!-- Main area: dockview container -->
+<div id="app-root">
+  <!-- Dockview will mount here -->
+  <div id="dockview-container"></div>
+</div>
+
+<!-- Hidden panel content templates (dockview renders these into panels) -->
+
+<!-- Services panel content -->
+<template id="tmpl-services">
+  <div class="panel-content" id="panel-content-services">
+    <div class="panel-toolbar">
+      <select id="service-select" class="service-select">
+        <option value="https://takawasi-social.com">Portal</option>
+        <option value="https://novelforge.takawasi-social.com">NovelForge</option>
+        <option value="https://articleforge.takawasi-social.com">ArticleForge</option>
+        <option value="https://budgetcode.takawasi-social.com">BudgetCode</option>
+        <option value="https://si.takawasi-social.com">SI</option>
+        <option value="https://memforge.takawasi-social.com">MemForge</option>
+        <option value="https://launchpad.takawasi-social.com">LaunchPad</option>
+      </select>
+    </div>
+    <webview id="wv-services"
+      src="https://takawasi-social.com"
+      partition="persist:takawasi"
+      webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
+      class="panel-webview">
+    </webview>
+  </div>
+</template>
+
+<!-- TBA Chat panel content -->
+<template id="tmpl-tba">
+  <div class="panel-content" id="panel-content-tba">
+    <div id="tba-messages" class="tba-messages"></div>
+    <div id="tba-input-area" class="tba-input-area">
+      <span id="tba-stage-label" class="stage-label"></span>
+      <textarea id="tba-input" class="tba-input" placeholder="やりたいことを入力... (Enter で送信、Shift+Enter で改行)" rows="3"></textarea>
+      <button id="tba-send" class="btn-send">送信</button>
+    </div>
+  </div>
+</template>
+
+<!-- LaunchPad panel content -->
+<template id="tmpl-launchpad">
+  <div class="panel-content" id="panel-content-launchpad">
+    <div class="panel-toolbar">
+      <span class="toolbar-title">生成物一覧</span>
+      <button id="btn-lp-refresh" class="icon-btn" title="更新">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+      </button>
+    </div>
+    <div id="lp-list" class="lp-list">
+      <div class="lp-placeholder">ログイン後に生成物が表示されます</div>
+    </div>
+  </div>
+</template>
+
+<!-- Terminal panel content -->
+<template id="tmpl-terminal">
+  <div class="panel-content" id="panel-content-terminal">
+    <div id="terminal-container" class="terminal-container"></div>
+  </div>
+</template>
+
+<!-- Auth status bar (bottom) -->
+<div id="status-bar">
+  <span id="auth-status-text">未ログイン</span>
+  <button id="btn-login" class="status-btn">ログイン</button>
+  <button id="btn-logout" class="status-btn hidden">ログアウト</button>
 </div>
 
 <script src="app.js"></script>

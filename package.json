@@ -1,6 +1,6 @@
 {
   "name": "takawasi-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "takawasi-platform all-in-one desktop app — split-screen services, TBA chat, terminal, CLI",
   "main": "dist/main/index.js",
   "scripts": {
@@ -16,18 +16,25 @@
     "dist:win": "npm run build && npm run build:cli && electron-builder --win",
     "dist:linux": "npm run build && npm run build:cli && electron-builder --linux"
   },
-  "keywords": ["takawasi", "electron", "desktop", "tba", "ai"],
+  "keywords": [
+    "takawasi",
+    "electron",
+    "desktop",
+    "tba",
+    "ai"
+  ],
   "author": "takawasi",
   "license": "MIT",
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
     "@types/node": "^20.0.0",
-    "esbuild": "^0.20.0",
     "electron": "^30.0.0",
     "electron-builder": "^24.13.0",
+    "esbuild": "^0.20.0",
     "typescript": "^5.4.0"
   },
   "dependencies": {
+    "dockview-core": "^5.2.0",
     "node-pty": "^1.0.0",
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0"

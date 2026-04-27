@@ -1,92 +1,275 @@
-// renderer/app.ts — Takawasi Desktop renderer process
-// Runs in contextIsolation. Access to main via window.takawasi (contextBridge)
-// Types: see globals.d.ts
+// renderer/app.ts — Takawasi Desktop v0.2 renderer
+// VSCode-like dockable UI with activity bar using dockview-core
 
+import { createDockview } from 'dockview-core';
+import type {
+  DockviewApi,
+  IContentRenderer,
+  GroupPanelPartInitParameters,
+  CreateComponentOptions,
+  IDockviewPanel,
+} from 'dockview-core';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 
-// ── Resizer ─────────────────────────────────────────────────────────────────
+// ── localStorage key for panel layout state ─────────────────────────────────
+const LAYOUT_KEY = 'takawasi-desktop-v2-layout';
 
-function initResizers(): void {
-  // Horizontal resizers between panels
-  document.querySelectorAll<HTMLElement>('.resizer[data-direction="h"]').forEach(resizer => {
-    resizer.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      const prev = resizer.previousElementSibling as HTMLElement | null;
-      const next = resizer.nextElementSibling as HTMLElement | null;
-      if (!prev || !next) return;
+// ── Panel id enum ─────────────────────────────────────────────────────────────
+const PANEL_IDS = ['services', 'tba', 'launchpad', 'terminal'] as const;
+type PanelId = typeof PANEL_IDS[number];
 
-      resizer.classList.add('dragging');
-      const startX = e.clientX;
-      const prevW = prev.getBoundingClientRect().width;
-      const nextW = next.getBoundingClientRect().width;
+// ── Helper: clone a <template> content ───────────────────────────────────────
+function cloneTemplate(id: string): HTMLElement {
+  const tmpl = document.getElementById(id) as HTMLTemplateElement | null;
+  if (!tmpl) throw new Error(`Template not found: ${id}`);
+  const node = tmpl.content.cloneNode(true) as DocumentFragment;
+  const root = node.firstElementChild as HTMLElement;
+  if (!root) throw new Error(`Template has no root element: ${id}`);
+  return root;
+}
 
-      function onMove(ev: MouseEvent) {
-        const dx = ev.clientX - startX;
-        const newPrev = Math.max(180, prevW + dx);
-        const newNext = Math.max(180, nextW - dx);
-        prev!.style.flex = 'none';
-        prev!.style.width = `${newPrev}px`;
-        next!.style.flex = 'none';
-        next!.style.width = `${newNext}px`;
-      }
-      function onUp() {
-        resizer.classList.remove('dragging');
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      }
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    });
-  });
+// ── Content Renderers ─────────────────────────────────────────────────────────
 
-  // Vertical resizer between panels-row and terminal
-  const vResizer = document.getElementById('resizer-v');
-  const terminalPanelEl = document.getElementById('terminal-panel');
-  const panelsRow = document.getElementById('panels-row');
-  if (vResizer && terminalPanelEl && panelsRow) {
-    const capturedVResizer = vResizer;
-    const capturedTermPanel = terminalPanelEl;
-    capturedVResizer.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      capturedVResizer.classList.add('dragging');
-      const startY = e.clientY;
-      const termH = capturedTermPanel.getBoundingClientRect().height;
-
-      function onMove(ev: MouseEvent) {
-        const dy = startY - ev.clientY;
-        const newH = Math.max(120, Math.min(globalThis.innerHeight * 0.6, termH + dy));
-        capturedTermPanel.style.height = `${newH}px`;
-        capturedTermPanel.style.flexShrink = '0';
-      }
-      function onUp() {
-        capturedVResizer.classList.remove('dragging');
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        termFitAddon?.fit();
-      }
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    });
+class ServicesRenderer implements IContentRenderer {
+  readonly element: HTMLElement;
+  constructor() {
+    this.element = cloneTemplate('tmpl-services');
+  }
+  init(_params: GroupPanelPartInitParameters): void {
+    const select = this.element.querySelector<HTMLSelectElement>('#service-select');
+    const wv = this.element.querySelector<Element>('#wv-services');
+    if (select && wv) {
+      select.addEventListener('change', () => {
+        (wv as unknown as { src: string }).src = select.value;
+      });
+    }
   }
 }
 
-// ── Auth ─────────────────────────────────────────────────────────────────────
+class TbaRenderer implements IContentRenderer {
+  readonly element: HTMLElement;
+  constructor() {
+    this.element = cloneTemplate('tmpl-tba');
+    // Wrap input + button in a row div
+    const inputArea = this.element.querySelector<HTMLElement>('#tba-input-area');
+    if (inputArea) {
+      const input = inputArea.querySelector<HTMLElement>('#tba-input');
+      const send = inputArea.querySelector<HTMLElement>('#tba-send');
+      const stageLabel = inputArea.querySelector<HTMLElement>('#tba-stage-label');
+      if (input && send) {
+        const row = document.createElement('div');
+        row.className = 'tba-input-row';
+        if (stageLabel) inputArea.insertBefore(stageLabel, input);
+        inputArea.insertBefore(row, input);
+        row.appendChild(input);
+        row.appendChild(send);
+      }
+    }
+  }
+  init(_params: GroupPanelPartInitParameters): void {
+    initTbaInElement(this.element);
+  }
+}
+
+class LaunchpadRenderer implements IContentRenderer {
+  readonly element: HTMLElement;
+  constructor() {
+    this.element = cloneTemplate('tmpl-launchpad');
+  }
+  init(_params: GroupPanelPartInitParameters): void {
+    const btn = this.element.querySelector<HTMLButtonElement>('#btn-lp-refresh');
+    if (btn) btn.addEventListener('click', () => { void loadLaunchPadInElement(this.element); });
+  }
+}
+
+class TerminalRenderer implements IContentRenderer {
+  readonly element: HTMLElement;
+  private _fitAddon: FitAddon | null = null;
+
+  constructor() {
+    this.element = cloneTemplate('tmpl-terminal');
+  }
+
+  init(_params: GroupPanelPartInitParameters): void {
+    void initTerminalInElement(this.element, (fit) => { this._fitAddon = fit; });
+  }
+
+  layout(_width: number, _height: number): void {
+    this._fitAddon?.fit();
+  }
+
+  dispose(): void {
+    this._fitAddon = null;
+  }
+}
+
+// ── Component factory (createDockview requires this) ──────────────────────────
+
+function componentFactory(options: CreateComponentOptions): IContentRenderer {
+  switch (options.name) {
+    case 'services': return new ServicesRenderer();
+    case 'tba': return new TbaRenderer();
+    case 'launchpad': return new LaunchpadRenderer();
+    case 'terminal': return new TerminalRenderer();
+    default: return new ServicesRenderer();
+  }
+}
+
+// ── Dockview setup ────────────────────────────────────────────────────────────
+
+let dockviewApi: DockviewApi | null = null;
+
+function buildDockview(container: HTMLElement): DockviewApi {
+  return createDockview(container, {
+    createComponent: componentFactory,
+    theme: {
+      name: 'dockview-theme-dark',
+      className: 'dockview-theme-dark',
+    },
+    disableFloatingGroups: false,
+  });
+}
+
+interface SavedLayout {
+  version: number;
+  layout: ReturnType<DockviewApi['toJSON']>;
+}
+
+function saveLayout(): void {
+  if (!dockviewApi) return;
+  try {
+    const data: SavedLayout = { version: 1, layout: dockviewApi.toJSON() };
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(data));
+  } catch {
+    // localStorage failures are non-fatal
+  }
+}
+
+function tryRestoreLayout(api: DockviewApi): boolean {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    if (!raw) return false;
+    const saved = JSON.parse(raw) as SavedLayout;
+    if (saved.version !== 1 || !saved.layout) return false;
+    api.fromJSON(saved.layout);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function addDefaultPanels(api: DockviewApi): void {
+  // Initial 3-column layout + terminal below services
+  api.addPanel({
+    id: 'services',
+    component: 'services',
+    title: 'サービス',
+    initialWidth: 600,
+  });
+
+  api.addPanel({
+    id: 'tba',
+    component: 'tba',
+    title: 'TBA チャット',
+    position: { referencePanel: 'services', direction: 'right' },
+    initialWidth: 400,
+  });
+
+  api.addPanel({
+    id: 'launchpad',
+    component: 'launchpad',
+    title: 'LaunchPad',
+    position: { referencePanel: 'tba', direction: 'right' },
+    initialWidth: 280,
+  });
+
+  api.addPanel({
+    id: 'terminal',
+    component: 'terminal',
+    title: 'ターミナル',
+    position: { referencePanel: 'services', direction: 'below' },
+    initialHeight: 220,
+  });
+}
+
+// ── Activity bar state management ─────────────────────────────────────────────
+
+function updateActivityBar(): void {
+  if (!dockviewApi) return;
+  document.querySelectorAll<HTMLElement>('.activity-item[data-panel]').forEach(btn => {
+    const panelId = btn.dataset.panel as PanelId;
+    const panel = dockviewApi!.getPanel(panelId);
+    if (panel) {
+      btn.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+    }
+  });
+}
+
+const PANEL_TITLES: Record<PanelId, string> = {
+  services: 'サービス',
+  tba: 'TBA チャット',
+  launchpad: 'LaunchPad',
+  terminal: 'ターミナル',
+};
+
+function togglePanel(panelId: PanelId): void {
+  if (!dockviewApi) return;
+  const panel = dockviewApi.getPanel(panelId);
+
+  if (panel) {
+    // Panel exists — close (hide) it
+    panel.api.close();
+  } else {
+    // Panel was closed — add it back
+    const panels = dockviewApi.panels;
+    const addOpts: Parameters<DockviewApi['addPanel']>[0] = {
+      id: panelId,
+      component: panelId,
+      title: PANEL_TITLES[panelId],
+    };
+    if (panels.length > 0) {
+      addOpts.position = { referencePanel: panels[panels.length - 1].id, direction: 'right' };
+    }
+    dockviewApi.addPanel(addOpts);
+  }
+
+  updateActivityBar();
+  saveLayout();
+}
+
+// ── Terminal toggle (Ctrl+`) ──────────────────────────────────────────────────
+
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === '`') {
+    e.preventDefault();
+    togglePanel('terminal');
+  }
+});
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
 
 function updateAuthUI(loggedIn: boolean): void {
-  const status = document.getElementById('auth-status')!;
+  const statusText = document.getElementById('auth-status-text')!;
   const btnLogin = document.getElementById('btn-login')!;
   const btnLogout = document.getElementById('btn-logout')!;
+  const authBtn = document.getElementById('activity-auth')!;
+
   if (loggedIn) {
-    status.textContent = 'ログイン済み';
+    statusText.textContent = 'ログイン済み';
     btnLogin.classList.add('hidden');
     btnLogout.classList.remove('hidden');
-    // Refresh LaunchPad after login
-    loadLaunchPad();
+    authBtn.classList.add('active');
+    // Refresh LaunchPad in current rendered instance
+    const lpEl = document.getElementById('panel-content-launchpad');
+    if (lpEl) void loadLaunchPadInElement(lpEl);
   } else {
-    status.textContent = '未ログイン';
+    statusText.textContent = '未ログイン';
     btnLogin.classList.remove('hidden');
     btnLogout.classList.add('hidden');
+    authBtn.classList.remove('active');
   }
 }
 
@@ -101,60 +284,29 @@ async function initAuth(): Promise<void> {
   document.getElementById('btn-login')!.addEventListener('click', () => {
     window.takawasi.auth.login();
   });
+
   document.getElementById('btn-logout')!.addEventListener('click', async () => {
     await window.takawasi.auth.logout();
     updateAuthUI(false);
-    document.getElementById('lp-list')!.innerHTML = '<div class="lp-placeholder">ログイン後に生成物が表示されます</div>';
+    const lpEl = document.getElementById('panel-content-launchpad');
+    if (lpEl) {
+      const list = lpEl.querySelector<HTMLElement>('#lp-list');
+      if (list) list.innerHTML = '<div class="lp-placeholder">ログイン後に生成物が表示されます</div>';
+    }
+  });
+
+  // Activity bar auth button: toggle login/logout
+  document.getElementById('activity-auth')!.addEventListener('click', () => {
+    const isLoggedIn = !document.getElementById('btn-logout')!.classList.contains('hidden');
+    if (isLoggedIn) {
+      void window.takawasi.auth.logout().then(() => updateAuthUI(false));
+    } else {
+      void window.takawasi.auth.login();
+    }
   });
 }
 
-// ── Service WebView ───────────────────────────────────────────────────────────
-
-function initServicePanel(): void {
-  const select = document.getElementById('service-select') as HTMLSelectElement;
-  const wv = document.getElementById('wv-services') as Electron.WebviewTag;
-  select.addEventListener('change', () => {
-    (wv as unknown as { src: string }).src = select.value;
-  });
-}
-
-// ── Panel tabs (single-panel mobile-like nav) ─────────────────────────────────
-// In desktop mode we show all panels; nav buttons just scroll/focus
-
-function initNav(): void {
-  const mainLayout = document.getElementById('main-layout')!;
-  // Enable multi-panel mode always (full desktop layout)
-  mainLayout.classList.add('multi-panel');
-
-  document.querySelectorAll<HTMLElement>('.nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      // Focus corresponding panel
-      const panelId = `panel-${btn.dataset.panel}`;
-      document.getElementById(panelId)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    });
-  });
-}
-
-// ── TBA Chat (Phase D) ────────────────────────────────────────────────────────
-
-let tbaStreaming = false;
-
-function appendTbaMsg(type: 'user' | 'assistant' | 'stage', text: string): HTMLElement {
-  const messages = document.getElementById('tba-messages')!;
-  const div = document.createElement('div');
-  div.className = `tba-msg ${type}`;
-  div.textContent = text;
-  messages.appendChild(div);
-  messages.scrollTop = messages.scrollHeight;
-  return div;
-}
-
-function scrollTbaMessages(): void {
-  const messages = document.getElementById('tba-messages')!;
-  messages.scrollTop = messages.scrollHeight;
-}
+// ── TBA Chat ──────────────────────────────────────────────────────────────────
 
 interface TbaSsePayload {
   stage?: string;
@@ -166,42 +318,35 @@ interface TbaSsePayload {
   credits_used?: number;
 }
 
-async function sendTbaMessage(message: string): Promise<void> {
-  if (tbaStreaming || !message.trim()) return;
-  tbaStreaming = true;
+function initTbaInElement(root: HTMLElement): void {
+  let tbaStreaming = false;
+  const input = root.querySelector<HTMLTextAreaElement>('#tba-input')!;
+  const sendBtn = root.querySelector<HTMLButtonElement>('#tba-send')!;
+  const stageLabel = root.querySelector<HTMLElement>('#tba-stage-label')!;
+  const messages = root.querySelector<HTMLElement>('#tba-messages')!;
 
-  const sendBtn = document.getElementById('tba-send') as HTMLButtonElement;
-  const stageLabel = document.getElementById('tba-stage-label')!;
-  sendBtn.disabled = true;
-
-  appendTbaMsg('user', message);
-
-  const assistantDiv = appendTbaMsg('assistant', '');
-  let accumulated = '';
-  let sseBuffer = '';
-  let finished = false;
-  const streamId = `tba-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-  function finish(): void {
-    if (finished) return;
-    finished = true;
-    window.takawasi.tba.removeListeners(streamId);
-    stageLabel.textContent = '';
-    if (!accumulated && !assistantDiv.textContent.trim()) {
-      assistantDiv.textContent = '(応答なし)';
-    }
-    tbaStreaming = false;
-    sendBtn.disabled = false;
+  function appendMsg(type: 'user' | 'assistant' | 'stage', text: string): HTMLElement {
+    const div = document.createElement('div');
+    div.className = `tba-msg ${type}`;
+    div.textContent = text;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+    return div;
   }
 
-  function handleSseEvent(eventName: string, rawData: string): void {
+  function handleSseEvent(
+    eventName: string,
+    rawData: string,
+    assistantDiv: HTMLElement,
+    accumulated: { v: string },
+  ): void {
     let payload: TbaSsePayload;
     try {
       payload = JSON.parse(rawData) as TbaSsePayload;
     } catch {
-      accumulated += rawData;
-      assistantDiv.textContent = accumulated;
-      scrollTbaMessages();
+      accumulated.v += rawData;
+      assistantDiv.textContent = accumulated.v;
+      messages.scrollTop = messages.scrollHeight;
       return;
     }
 
@@ -210,34 +355,36 @@ async function sendTbaMessage(message: string): Promise<void> {
       const text = payload.text || '';
       const finalSuffix = payload.final ? ' final' : '';
       if (stage) stageLabel.textContent = `${stage}${finalSuffix}`;
-
       if (stage && stage !== 'execute') {
-        appendTbaMsg('stage', `[${stage}${finalSuffix}] ${text}`);
+        appendMsg('stage', `[${stage}${finalSuffix}] ${text}`);
         return;
       }
-
       if (text) {
-        accumulated += text;
-        assistantDiv.textContent = accumulated;
-        scrollTbaMessages();
+        accumulated.v += text;
+        assistantDiv.textContent = accumulated.v;
+        messages.scrollTop = messages.scrollHeight;
       }
       return;
     }
 
     if (eventName === 'done') {
       const credits = typeof payload.credits_used === 'number' ? ` credits=${payload.credits_used}` : '';
-      appendTbaMsg('stage', `[done]${credits}`);
+      appendMsg('stage', `[done]${credits}`);
       return;
     }
 
     if (eventName === 'error') {
       const code = payload.code ? `${payload.code}: ` : '';
       assistantDiv.textContent = `エラー: ${code}${payload.message || rawData}`;
-      scrollTbaMessages();
+      messages.scrollTop = messages.scrollHeight;
     }
   }
 
-  function parseSseBlock(block: string): void {
+  function parseSseBlock(
+    block: string,
+    assistantDiv: HTMLElement,
+    accumulated: { v: string },
+  ): void {
     let eventName = 'message';
     const dataLines: string[] = [];
     for (const rawLine of block.split('\n')) {
@@ -250,62 +397,76 @@ async function sendTbaMessage(message: string): Promise<void> {
       if (field === 'data') dataLines.push(value);
     }
     if (dataLines.length > 0) {
-      handleSseEvent(eventName, dataLines.join('\n'));
+      handleSseEvent(eventName, dataLines.join('\n'), assistantDiv, accumulated);
     }
   }
 
-  function consumeSse(chunk: string): void {
-    sseBuffer = `${sseBuffer}${chunk}`.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    const blocks = sseBuffer.split('\n\n');
-    sseBuffer = blocks.pop() || '';
-    for (const block of blocks) parseSseBlock(block);
-  }
+  async function send(): Promise<void> {
+    if (tbaStreaming || !input.value.trim()) return;
+    const message = input.value.trim();
+    input.value = '';
+    tbaStreaming = true;
+    sendBtn.disabled = true;
 
-  window.takawasi.tba.onChunk(streamId, consumeSse);
-  window.takawasi.tba.onError(streamId, (err) => {
-    assistantDiv.textContent = `接続エラー: ${err.status ? `HTTP ${err.status}: ` : ''}${err.message}`;
-    scrollTbaMessages();
-  });
-  window.takawasi.tba.onEnd(streamId, () => {
-    if (sseBuffer.trim()) parseSseBlock(sseBuffer);
-    finish();
-  });
+    appendMsg('user', message);
+    const assistantDiv = appendMsg('assistant', '');
+    const accumulated = { v: '' };
+    let sseBuffer = '';
+    let finished = false;
 
-  try {
-    const started = await window.takawasi.tba.start(streamId, message);
-    if (!started.ok) {
-      assistantDiv.textContent = `エラー: ${started.error || 'stream start failed'}`;
+    const streamId = `tba-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    function finish(): void {
+      if (finished) return;
+      finished = true;
+      window.takawasi.tba.removeListeners(streamId);
+      stageLabel.textContent = '';
+      if (!accumulated.v && !assistantDiv.textContent.trim()) {
+        assistantDiv.textContent = '(応答なし)';
+      }
+      tbaStreaming = false;
+      sendBtn.disabled = false;
+    }
+
+    function consumeSse(chunk: string): void {
+      sseBuffer = `${sseBuffer}${chunk}`.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const blocks = sseBuffer.split('\n\n');
+      sseBuffer = blocks.pop() || '';
+      for (const block of blocks) parseSseBlock(block, assistantDiv, accumulated);
+    }
+
+    window.takawasi.tba.onChunk(streamId, consumeSse);
+    window.takawasi.tba.onError(streamId, (err) => {
+      assistantDiv.textContent = `接続エラー: ${err.status ? `HTTP ${err.status}: ` : ''}${err.message}`;
+      messages.scrollTop = messages.scrollHeight;
+    });
+    window.takawasi.tba.onEnd(streamId, () => {
+      if (sseBuffer.trim()) parseSseBlock(sseBuffer, assistantDiv, accumulated);
+      finish();
+    });
+
+    try {
+      const started = await window.takawasi.tba.start(streamId, message);
+      if (!started.ok) {
+        assistantDiv.textContent = `エラー: ${started.error || 'stream start failed'}`;
+        finish();
+      }
+    } catch (err) {
+      assistantDiv.textContent = `接続エラー: ${String(err)}`;
       finish();
     }
-  } catch (err) {
-    assistantDiv.textContent = `接続エラー: ${String(err)}`;
-    finish();
   }
-}
 
-function initTba(): void {
-  const input = document.getElementById('tba-input') as HTMLTextAreaElement;
-  const sendBtn = document.getElementById('tba-send')!;
-
-  sendBtn.addEventListener('click', () => {
-    const msg = input.value.trim();
-    if (!msg) return;
-    input.value = '';
-    sendTbaMessage(msg);
-  });
-
+  sendBtn.addEventListener('click', () => { void send(); });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      const msg = input.value.trim();
-      if (!msg) return;
-      input.value = '';
-      sendTbaMessage(msg);
+      void send();
     }
   });
 }
 
-// ── LaunchPad (Phase D) ───────────────────────────────────────────────────────
+// ── LaunchPad ─────────────────────────────────────────────────────────────────
 
 interface LPItem {
   service: string;
@@ -315,8 +476,34 @@ interface LPItem {
   updatedAt?: string | null;
 }
 
-async function loadLaunchPad(): Promise<void> {
-  const list = document.getElementById('lp-list')!;
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function formatArtifactMeta(item: LPItem): string {
+  const size = item.sizeBytes >= 1024 * 1024
+    ? `${(item.sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(1, Math.ceil(item.sizeBytes / 1024))} KB`;
+  return `${item.fileCount} files / ${size}`;
+}
+
+async function downloadItem(item: LPItem): Promise<void> {
+  try {
+    const result = await window.takawasi.launchpad.download(item.service, item.runId);
+    if (!result.ok || !result.data) {
+      alert(`DL エラー: ${result.error || 'LaunchPad MCP error'}`);
+      return;
+    }
+    const url = result.data.download_url;
+    if (url) void window.takawasi.shell.openExternal(url);
+  } catch (err) {
+    alert(`DL エラー: ${String(err)}`);
+  }
+}
+
+async function loadLaunchPadInElement(root: HTMLElement): Promise<void> {
+  const list = root.querySelector<HTMLElement>('#lp-list');
+  if (!list) return;
   list.innerHTML = '<div class="lp-placeholder">読み込み中...</div>';
 
   try {
@@ -355,7 +542,7 @@ async function loadLaunchPad(): Promise<void> {
         <span class="lp-item-meta">${escapeHtml(formatArtifactMeta(item))}</span>
         <button class="lp-dl-btn" data-service="${escapeHtml(item.service)}" data-run-id="${escapeHtml(item.runId)}">DL</button>
       `;
-      row.querySelector('.lp-dl-btn')!.addEventListener('click', () => downloadItem(item));
+      row.querySelector('.lp-dl-btn')!.addEventListener('click', () => { void downloadItem(item); });
       list.appendChild(row);
     }
   } catch (err) {
@@ -363,40 +550,9 @@ async function loadLaunchPad(): Promise<void> {
   }
 }
 
-async function downloadItem(item: LPItem): Promise<void> {
-  try {
-    const result = await window.takawasi.launchpad.download(item.service, item.runId);
-    if (!result.ok || !result.data) {
-      alert(`DL エラー: ${result.error || 'LaunchPad MCP error'}`);
-      return;
-    }
-    const url = result.data.download_url;
-    if (url) window.takawasi.shell.openExternal(url);
-  } catch (err) {
-    alert(`DL エラー: ${String(err)}`);
-  }
-}
+// ── Terminal ──────────────────────────────────────────────────────────────────
 
-function formatArtifactMeta(item: LPItem): string {
-  const size = item.sizeBytes >= 1024 * 1024
-    ? `${(item.sizeBytes / (1024 * 1024)).toFixed(1)} MB`
-    : `${Math.max(1, Math.ceil(item.sizeBytes / 1024))} KB`;
-  return `${item.fileCount} files / ${size}`;
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-function initLaunchPad(): void {
-  document.getElementById('btn-lp-refresh')!.addEventListener('click', loadLaunchPad);
-}
-
-// ── Terminal (Phase C) ────────────────────────────────────────────────────────
-
-let termFitAddon: FitAddon | null = null;
-
-async function initTerminal(): Promise<void> {
+async function initTerminalInElement(root: HTMLElement, onFit: (fit: FitAddon) => void): Promise<void> {
   const term = new Terminal({
     theme: {
       background: '#000000',
@@ -410,11 +566,11 @@ async function initTerminal(): Promise<void> {
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-  termFitAddon = fitAddon;
+  onFit(fitAddon);
 
-  const container = document.getElementById('terminal-container')!;
+  const container = root.querySelector<HTMLElement>('#terminal-container')!;
   term.open(container);
-  termFitAddon?.fit();
+  fitAddon.fit();
 
   const termId = 'main';
   window.takawasi.terminal.onData(termId, (data: string) => term.write(data));
@@ -426,14 +582,14 @@ async function initTerminal(): Promise<void> {
     return;
   }
 
-  term.onData((data: string) => window.takawasi.terminal.write(termId, data));
+  term.onData((data: string) => { void window.takawasi.terminal.write(termId, data); });
 
   if (typeof ResizeObserver !== 'undefined') {
     const ro = new ResizeObserver(() => {
-      termFitAddon?.fit();
+      fitAddon.fit();
       const cols = Math.max(40, Math.floor(container.clientWidth / 8));
       const rows = Math.max(4, Math.floor(container.clientHeight / 18));
-      window.takawasi.terminal.resize(termId, cols, rows);
+      void window.takawasi.terminal.resize(termId, cols, rows);
     });
     ro.observe(container);
   }
@@ -442,11 +598,33 @@ async function initTerminal(): Promise<void> {
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
-  initNav();
-  initResizers();
-  initServicePanel();
-  initAuth();
-  initTba();
-  initLaunchPad();
-  await initTerminal();
+  const container = document.getElementById('dockview-container')!;
+
+  const api = buildDockview(container);
+  dockviewApi = api;
+
+  // Restore or create default layout
+  const restored = tryRestoreLayout(api);
+  if (!restored) {
+    addDefaultPanels(api);
+  }
+
+  // Persist layout on changes
+  api.onDidAddPanel((_p: IDockviewPanel) => { updateActivityBar(); saveLayout(); });
+  api.onDidRemovePanel((_p: IDockviewPanel) => { updateActivityBar(); saveLayout(); });
+  api.onDidLayoutChange(() => { saveLayout(); });
+
+  updateActivityBar();
+
+  // Wire activity bar panel toggles
+  document.querySelectorAll<HTMLElement>('.activity-item[data-panel]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const panelId = btn.dataset.panel as PanelId;
+      if ((PANEL_IDS as readonly string[]).includes(panelId)) {
+        togglePanel(panelId);
+      }
+    });
+  });
+
+  await initAuth();
 });
