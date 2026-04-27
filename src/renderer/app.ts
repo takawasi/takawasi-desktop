@@ -1,36 +1,6 @@
 // renderer/app.ts — Takawasi Desktop renderer process
 // Runs in contextIsolation. Access to main via window.takawasi (contextBridge)
-
-declare const window: Window & {
-  takawasi: TakawasiAPI;
-};
-
-interface TakawasiAPI {
-  auth: {
-    check: () => Promise<{ loggedIn: boolean }>;
-    login: () => Promise<{ ok: boolean }>;
-    logout: () => Promise<{ ok: boolean }>;
-    onCompleted: (cb: (data: { loggedIn: boolean }) => void) => void;
-  };
-  tba: {
-    streamInfo: () => Promise<{ cookieHeader: string; endpoint: string }>;
-  };
-  terminal: {
-    create: (id: string) => Promise<{ ok: boolean; error?: string }>;
-    write: (id: string, data: string) => Promise<{ ok: boolean }>;
-    resize: (id: string, cols: number, rows: number) => Promise<{ ok: boolean }>;
-    destroy: (id: string) => Promise<{ ok: boolean }>;
-    onData: (id: string, cb: (data: string) => void) => void;
-    onExit: (id: string, cb: () => void) => void;
-    removeListeners: (id: string) => void;
-  };
-  launchpad: {
-    cookieHeader: () => Promise<{ cookieHeader: string }>;
-  };
-  shell: {
-    openExternal: (url: string) => Promise<{ ok: boolean }>;
-  };
-}
+// Types: see globals.d.ts
 
 // ── Resizer ─────────────────────────────────────────────────────────────────
 
@@ -69,26 +39,27 @@ function initResizers(): void {
 
   // Vertical resizer between panels-row and terminal
   const vResizer = document.getElementById('resizer-v');
-  const terminalPanel = document.getElementById('terminal-panel');
+  const terminalPanelEl = document.getElementById('terminal-panel');
   const panelsRow = document.getElementById('panels-row');
-  if (vResizer && terminalPanel && panelsRow) {
-    vResizer.addEventListener('mousedown', (e) => {
+  if (vResizer && terminalPanelEl && panelsRow) {
+    const capturedVResizer = vResizer;
+    const capturedTermPanel = terminalPanelEl;
+    capturedVResizer.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      vResizer.classList.add('dragging');
+      capturedVResizer.classList.add('dragging');
       const startY = e.clientY;
-      const termH = terminalPanel.getBoundingClientRect().height;
+      const termH = capturedTermPanel.getBoundingClientRect().height;
 
       function onMove(ev: MouseEvent) {
         const dy = startY - ev.clientY;
-        const newH = Math.max(120, Math.min(window.innerHeight * 0.6, termH + dy));
-        terminalPanel.style.height = `${newH}px`;
-        terminalPanel.style.flexShrink = '0';
+        const newH = Math.max(120, Math.min(globalThis.innerHeight * 0.6, termH + dy));
+        capturedTermPanel.style.height = `${newH}px`;
+        capturedTermPanel.style.flexShrink = '0';
       }
       function onUp() {
-        vResizer.classList.remove('dragging');
+        capturedVResizer.classList.remove('dragging');
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        // Refit terminal after resize
         termFitAddon?.fit();
       }
       document.addEventListener('mousemove', onMove);
@@ -375,31 +346,32 @@ function initLaunchPad(): void {
 
 let termFitAddon: { fit: () => void } | null = null;
 
-async function initTerminal(): Promise<void> {
-  // Dynamically import xterm from node_modules (file:// path in dev)
-  // In production build, these would be bundled; in dev we load from node_modules
-  const xtermModule = await (window as unknown as { require: (m: string) => { Terminal: new (opts: object) => XTermLike } }).require?.('xterm') ||
-    await import('../../node_modules/xterm/lib/xterm.js').catch(() => null);
+interface XTermLike {
+  open: (el: HTMLElement) => void;
+  loadAddon: (addon: object) => void;
+  onData: (cb: (data: string) => void) => void;
+  write: (data: string) => void;
+  dispose: () => void;
+}
+interface FitAddonLike { fit: () => void; }
 
-  if (!xtermModule) {
-    document.getElementById('terminal-container')!.textContent = 'xterm.js を読み込めませんでした';
+async function initTerminal(): Promise<void> {
+  // In Electron renderer (file:// origin), we load xterm via script tags in HTML
+  // or use a typed require shim. The Terminal class is expected to be globally
+  // available from the xterm CSS/JS link in index.html, OR loaded via require.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const g = globalThis as unknown as Record<string, unknown>;
+  // Try global (if xterm was loaded via <script> tag), then skip gracefully
+  const TerminalClass = (g['Terminal'] as (new (opts: object) => XTermLike) | undefined);
+  const FitAddonClass = (g['FitAddon'] as (new () => FitAddonLike) | undefined);
+
+  if (!TerminalClass) {
+    const container = document.getElementById('terminal-container');
+    if (container) container.textContent = 'xterm.js を読み込めませんでした（開発モードでは npm run dev で起動してください）';
     return;
   }
 
-  const { Terminal } = xtermModule;
-  const fitModule = await (window as unknown as { require: (m: string) => { FitAddon: new () => FitAddonLike } }).require?.('xterm-addon-fit') ||
-    await import('../../node_modules/xterm-addon-fit/lib/xterm-addon-fit.js').catch(() => null);
-
-  interface XTermLike {
-    open: (el: HTMLElement) => void;
-    loadAddon: (addon: object) => void;
-    onData: (cb: (data: string) => void) => void;
-    write: (data: string) => void;
-    dispose: () => void;
-  }
-  interface FitAddonLike { fit: () => void; }
-
-  const term: XTermLike = new Terminal({
+  const term: XTermLike = new TerminalClass({
     theme: {
       background: '#000000',
       foreground: '#e8e8f5',
@@ -410,9 +382,8 @@ async function initTerminal(): Promise<void> {
     cursorBlink: true,
   });
 
-  if (fitModule) {
-    const { FitAddon } = fitModule;
-    const fitAddon: FitAddonLike = new FitAddon();
+  if (FitAddonClass) {
+    const fitAddon: FitAddonLike = new FitAddonClass();
     term.loadAddon(fitAddon);
     termFitAddon = fitAddon;
   }
@@ -433,7 +404,6 @@ async function initTerminal(): Promise<void> {
 
   term.onData((data: string) => window.takawasi.terminal.write(termId, data));
 
-  // Resize observer
   if (typeof ResizeObserver !== 'undefined') {
     const ro = new ResizeObserver(() => {
       termFitAddon?.fit();

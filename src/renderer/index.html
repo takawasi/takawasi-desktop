@@ -11,8 +11,10 @@
            frame-src https://*.takawasi-social.com;">
 <title>Takawasi Desktop</title>
 <link rel="stylesheet" href="styles.css">
-<!-- xterm.js CSS from node_modules (served as file:// in dev, bundled in dist) -->
+<!-- xterm.js from node_modules — loaded as UMD globals for Electron file:// context -->
 <link rel="stylesheet" href="../node_modules/xterm/css/xterm.css">
+<script src="../node_modules/xterm/lib/xterm.js"></script>
+<script src="../node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
 </head>
 <body>
 
