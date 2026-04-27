@@ -9,7 +9,12 @@ interface TakawasiAPI {
     onCompleted: (cb: (data: { loggedIn: boolean }) => void) => void;
   };
   tba: {
-    streamInfo: () => Promise<{ cookieHeader: string; endpoint: string }>;
+    start: (id: string, message: string) => Promise<{ ok: boolean; error?: string }>;
+    cancel: (id: string) => Promise<{ ok: boolean }>;
+    onChunk: (id: string, cb: (chunk: string) => void) => void;
+    onError: (id: string, cb: (data: { status?: number; message: string }) => void) => void;
+    onEnd: (id: string, cb: () => void) => void;
+    removeListeners: (id: string) => void;
   };
   terminal: {
     create: (id: string) => Promise<{ ok: boolean; error?: string }>;
@@ -21,7 +26,8 @@ interface TakawasiAPI {
     removeListeners: (id: string) => void;
   };
   launchpad: {
-    cookieHeader: () => Promise<{ cookieHeader: string }>;
+    list: () => Promise<{ ok: boolean; data?: LaunchPadListResponse; error?: string }>;
+    download: (service: string, runId: string) => Promise<{ ok: boolean; data?: LaunchPadDownloadResponse; error?: string }>;
   };
   shell: {
     openExternal: (url: string) => Promise<{ ok: boolean }>;
@@ -30,4 +36,29 @@ interface TakawasiAPI {
 
 interface Window {
   takawasi: TakawasiAPI;
+}
+
+interface LaunchPadArtifact {
+  id: string;
+  file_count: number;
+  size_bytes: number;
+  updated_at?: string | null;
+  updated_at_ts?: number | null;
+  deployed_at?: string | null;
+  dl_available: boolean;
+  registry_corrupted: boolean;
+}
+
+interface LaunchPadListResponse {
+  user_id: string;
+  artifacts: Record<string, LaunchPadArtifact[]>;
+  generated_at: string;
+}
+
+interface LaunchPadDownloadResponse {
+  download_url?: string;
+  expires_in?: number;
+  size_bytes?: number;
+  service?: string;
+  run_id?: string;
 }

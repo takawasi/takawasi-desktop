@@ -77,37 +77,64 @@ function streamRequest(url: string, body: object, headers: Record<string, string
       },
     }, (res) => {
       let buffer = '';
-      res.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6).trim();
-            if (data === '[DONE]') continue;
-            try {
-              const parsed = JSON.parse(data) as {
-                type?: string;
-                stage?: number;
-                stage_name?: string;
-                content?: string;
-                delta?: string;
-              };
-              if (parsed.type === 'stage' || parsed.stage !== undefined) {
-                const stageName = parsed.stage_name || `段${parsed.stage}`;
-                process.stderr.write(`\r[${stageName}] `);
-              } else if (parsed.content) {
-                process.stdout.write(parsed.content);
-              } else if (parsed.delta) {
-                process.stdout.write(parsed.delta);
-              }
-            } catch {
-              process.stdout.write(data);
+      const handleEvent = (eventName: string, rawData: string): void => {
+        try {
+          const parsed = JSON.parse(rawData) as {
+            stage?: string;
+            text?: string;
+            final?: boolean;
+            code?: string;
+            message?: string;
+            credits_used?: number;
+          };
+          if (eventName === 'chunk') {
+            const stage = parsed.stage || '';
+            const text = parsed.text || '';
+            if (stage && stage !== 'execute') {
+              process.stderr.write(`\r[${stage}${parsed.final ? ' final' : ''}] ${text}\n`);
+            } else if (text) {
+              process.stdout.write(text);
             }
+            return;
           }
+          if (eventName === 'done') {
+            const credits = typeof parsed.credits_used === 'number' ? ` credits=${parsed.credits_used}` : '';
+            process.stderr.write(`\n[done]${credits}\n`);
+            return;
+          }
+          if (eventName === 'error') {
+            const code = parsed.code ? `${parsed.code}: ` : '';
+            process.stderr.write(`\n[error] ${code}${parsed.message || rawData}\n`);
+          }
+        } catch {
+          process.stdout.write(rawData);
         }
+      };
+      const parseBlock = (block: string): void => {
+        let eventName = 'message';
+        const dataLines: string[] = [];
+        for (const rawLine of block.split('\n')) {
+          if (!rawLine || rawLine.startsWith(':')) continue;
+          const colon = rawLine.indexOf(':');
+          const field = colon >= 0 ? rawLine.slice(0, colon) : rawLine;
+          let value = colon >= 0 ? rawLine.slice(colon + 1) : '';
+          if (value.startsWith(' ')) value = value.slice(1);
+          if (field === 'event') eventName = value;
+          if (field === 'data') dataLines.push(value);
+        }
+        if (dataLines.length > 0) handleEvent(eventName, dataLines.join('\n'));
+      };
+      res.on('data', (chunk: Buffer) => {
+        buffer = `${buffer}${chunk.toString()}`.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop() || '';
+        for (const block of blocks) parseBlock(block);
       });
-      res.on('end', () => { process.stdout.write('\n'); resolve(); });
+      res.on('end', () => {
+        if (buffer.trim()) parseBlock(buffer);
+        process.stdout.write('\n');
+        resolve();
+      });
     });
     req.on('error', reject);
     req.write(payload);

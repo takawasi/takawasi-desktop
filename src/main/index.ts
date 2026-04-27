@@ -1,14 +1,100 @@
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, session, shell as electronShell } from 'electron';
 import * as path from 'path';
 import * as os from 'os';
+import * as http from 'http';
+import * as https from 'https';
+import type { IncomingHttpHeaders } from 'http';
 
 const TBA_ENGINE = process.env.TBA_ENGINE_URL || 'https://engine.takawasi-social.com';
+const LAUNCHPAD_URL = process.env.LAUNCHPAD_URL || 'https://launchpad.takawasi-social.com';
 const CREDITGATE_URL = 'https://creditgate.takawasi-social.com';
 const CG_SESSION_COOKIE = 'cg_session';
 const PARTITION = 'persist:takawasi';
 
 let mainWin: BrowserWindow | null = null;
 let authWin: BrowserWindow | null = null;
+
+interface HttpTextResponse {
+  status: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+}
+
+function appSession(): Electron.Session {
+  return session.fromPartition(PARTITION);
+}
+
+function sendToRenderer(sender: Electron.WebContents, channel: string, payload?: unknown): void {
+  if (!sender.isDestroyed()) {
+    sender.send(channel, payload);
+  }
+}
+
+function openHttpExternal(url: string): { ok: boolean; error?: string } {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return { ok: false, error: 'unsupported URL scheme' };
+    }
+    electronShell.openExternal(url);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function cgCookieHeaderFor(url: string): Promise<string> {
+  const cookies = await appSession().cookies.get({ url, name: CG_SESSION_COOKIE });
+  return cookies.map((c: Electron.Cookie) => `${c.name}=${c.value}`).join('; ');
+}
+
+function requestText(
+  urlString: string,
+  opts: { method?: string; headers?: Record<string, string | number>; body?: string | Buffer } = {},
+): Promise<HttpTextResponse> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlString);
+    const payload = opts.body;
+    const headers: Record<string, string | number> = { ...(opts.headers || {}) };
+    if (payload !== undefined && headers['Content-Length'] === undefined) {
+      headers['Content-Length'] = Buffer.byteLength(payload);
+    }
+
+    const lib = u.protocol === 'https:' ? https : http;
+    const req = lib.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port ? Number(u.port) : undefined,
+      path: u.pathname + u.search,
+      method: opts.method || 'GET',
+      headers,
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode || 0,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        });
+      });
+    });
+    req.on('error', reject);
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
+}
+
+async function callCreditGateLogout(): Promise<void> {
+  const cookieHeader = await cgCookieHeaderFor(CREDITGATE_URL);
+  const redirect = encodeURIComponent('https://takawasi-social.com');
+  await requestText(`${CREDITGATE_URL}/auth/logout?redirect=${redirect}`, {
+    method: 'GET',
+    headers: cookieHeader ? { Cookie: cookieHeader } : {},
+  });
+}
 
 function createMainWindow(): void {
   mainWin = new BrowserWindow({
@@ -22,10 +108,15 @@ function createMainWindow(): void {
       preload: path.join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       webviewTag: true,
-      session: session.fromPartition(PARTITION),
+      session: appSession(),
     },
+  });
+
+  mainWin.webContents.setWindowOpenHandler(({ url }) => {
+    openHttpExternal(url);
+    return { action: 'deny' };
   });
 
   mainWin.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
@@ -49,14 +140,19 @@ async function openAuthWindow(): Promise<void> {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      session: session.fromPartition(PARTITION),
+      session: appSession(),
     },
+  });
+
+  authWin.webContents.setWindowOpenHandler(({ url }) => {
+    openHttpExternal(url);
+    return { action: 'deny' };
   });
 
   authWin.loadURL(`${CREDITGATE_URL}/auth/login`);
 
   const checkCookieInterval = setInterval(async () => {
-    const cookies = await session.fromPartition(PARTITION).cookies.get({
+    const cookies = await appSession().cookies.get({
       url: CREDITGATE_URL,
       name: CG_SESSION_COOKIE,
     });
@@ -75,7 +171,7 @@ async function openAuthWindow(): Promise<void> {
 
 // IPC: auth
 ipcMain.handle('auth:check', async () => {
-  const cookies = await session.fromPartition(PARTITION).cookies.get({
+  const cookies = await appSession().cookies.get({
     url: CREDITGATE_URL,
     name: CG_SESSION_COOKIE,
   });
@@ -88,18 +184,89 @@ ipcMain.handle('auth:login', async () => {
 });
 
 ipcMain.handle('auth:logout', async () => {
-  await session.fromPartition(PARTITION).clearStorageData({ storages: ['cookies'] });
+  let remoteError = '';
+  try {
+    await callCreditGateLogout();
+  } catch (err) {
+    remoteError = err instanceof Error ? err.message : String(err);
+  }
+  await appSession().clearStorageData({ storages: ['cookies'] });
   mainWin?.webContents.send('auth:completed', { loggedIn: false });
+  return { ok: true, remoteError };
+});
+
+// IPC: TBA stream. Main process owns the HTTP request so renderer avoids CORS
+// and browser-forbidden Cookie headers.
+const tbaStreams = new Map<string, http.ClientRequest>();
+
+ipcMain.handle('tba:start', async (event, { id, message }: { id: string; message: string }) => {
+  if (!id || !message.trim()) return { ok: false, error: 'message is empty' };
+
+  const sender = event.sender;
+  const payload = JSON.stringify({ message, service: 'portal' });
+  const cookieHeader = await cgCookieHeaderFor(TBA_ENGINE);
+  const u = new URL(`${TBA_ENGINE}/api/tba/chat/stream`);
+  const headers: Record<string, string | number> = {
+    'Accept': 'text/event-stream',
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(payload),
+  };
+  if (cookieHeader) headers.Cookie = cookieHeader;
+
+  const lib = u.protocol === 'https:' ? https : http;
+  const req = lib.request({
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port ? Number(u.port) : undefined,
+    path: u.pathname + u.search,
+    method: 'POST',
+    headers,
+  }, (res) => {
+    if ((res.statusCode || 0) >= 400) {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      res.on('end', () => {
+        tbaStreams.delete(id);
+        sendToRenderer(sender, `tba:error:${id}`, {
+          status: res.statusCode || 0,
+          message: Buffer.concat(chunks).toString('utf8') || `HTTP ${res.statusCode || 0}`,
+        });
+        sendToRenderer(sender, `tba:end:${id}`);
+      });
+      return;
+    }
+
+    res.setEncoding('utf8');
+    res.on('data', (chunk: string) => {
+      sendToRenderer(sender, `tba:chunk:${id}`, chunk);
+    });
+    res.on('end', () => {
+      tbaStreams.delete(id);
+      sendToRenderer(sender, `tba:end:${id}`);
+    });
+  });
+
+  req.on('error', (err) => {
+    tbaStreams.delete(id);
+    sendToRenderer(sender, `tba:error:${id}`, { message: err.message });
+    sendToRenderer(sender, `tba:end:${id}`);
+  });
+
+  tbaStreams.set(id, req);
+  req.write(payload);
+  req.end();
   return { ok: true };
 });
 
-// IPC: TBA stream info (renderer fetches directly using returned cookie header)
-ipcMain.handle('tba:streamInfo', async () => {
-  const cookies = await session.fromPartition(PARTITION).cookies.get({
-    url: TBA_ENGINE,
-  });
-  const cookieHeader = cookies.map((c: Electron.Cookie) => `${c.name}=${c.value}`).join('; ');
-  return { cookieHeader, endpoint: `${TBA_ENGINE}/api/tba/chat/stream` };
+ipcMain.handle('tba:cancel', (_e, { id }: { id: string }) => {
+  const req = tbaStreams.get(id);
+  if (req) {
+    req.destroy();
+    tbaStreams.delete(id);
+  }
+  return { ok: true };
 });
 
 // IPC: terminal
@@ -110,7 +277,7 @@ const ptySessions = new Map<string, import('node-pty').IPty>();
 
 ipcMain.handle('terminal:create', async (event, { id }: { id: string }) => {
   if (!pty) return { ok: false, error: 'node-pty not available' };
-  const shell = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/bash');
+  const systemShell = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/bash');
   const cliDir = app.isPackaged
     ? path.join(process.resourcesPath, 'cli')
     : path.join(app.getAppPath(), 'dist', 'cli');
@@ -119,7 +286,7 @@ ipcMain.handle('terminal:create', async (event, { id }: { id: string }) => {
     PATH: `${cliDir}${path.delimiter}${process.env.PATH || ''}`,
     TERM: 'xterm-256color',
   };
-  const ptyProcess = pty.spawn(shell, [], {
+  const ptyProcess = pty.spawn(systemShell, [], {
     name: 'xterm-256color', cols: 80, rows: 24, cwd: os.homedir(), env,
   });
   ptySessions.set(id, ptyProcess);
@@ -142,17 +309,65 @@ ipcMain.handle('terminal:destroy', (_e, { id }: { id: string }) => {
   return { ok: true };
 });
 
-// IPC: LaunchPad cookie pass-through
-ipcMain.handle('launchpad:cookieHeader', async () => {
-  const cookies = await session.fromPartition(PARTITION).cookies.get({
-    url: 'https://launchpad.takawasi-social.com',
+// IPC: LaunchPad MCP. Main process owns JSON-RPC so renderer never fetches
+// cross-origin LaunchPad endpoints directly.
+let launchPadRpcId = 0;
+
+async function callLaunchPadTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  const cookieHeader = await cgCookieHeaderFor(LAUNCHPAD_URL);
+  const payload = JSON.stringify({
+    jsonrpc: '2.0',
+    id: ++launchPadRpcId,
+    method: 'tools/call',
+    params: { name, arguments: args },
   });
-  return { cookieHeader: cookies.map((c: Electron.Cookie) => `${c.name}=${c.value}`).join('; ') };
+  const headers: Record<string, string | number> = {
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(payload),
+  };
+  if (cookieHeader) headers.Cookie = cookieHeader;
+
+  const res = await requestText(`${LAUNCHPAD_URL}/mcp`, {
+    method: 'POST',
+    headers,
+    body: payload,
+  });
+  if (res.status === 401) throw new Error('ログインが必要です');
+  if (res.status >= 400) throw new Error(`HTTP ${res.status}: ${res.body}`);
+
+  const rpc = JSON.parse(res.body) as {
+    error?: { message?: string };
+    result?: { content?: Array<{ type?: string; text?: string }> };
+  };
+  if (rpc.error) throw new Error(rpc.error.message || 'LaunchPad MCP error');
+  const text = rpc.result?.content?.find((item) => item.type === 'text')?.text;
+  if (!text) return {};
+  return JSON.parse(text);
+}
+
+ipcMain.handle('launchpad:list', async () => {
+  try {
+    return { ok: true, data: await callLaunchPadTool('launchpad_list', {}) };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+ipcMain.handle('launchpad:download', async (_e, { service, runId }: { service: string; runId: string }) => {
+  try {
+    return {
+      ok: true,
+      data: await callLaunchPadTool('launchpad_download', { service, run_id: runId }),
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 });
 
 // IPC: open external
 ipcMain.handle('shell:openExternal', (_e, { url }: { url: string }) => {
-  shell.openExternal(url); return { ok: true };
+  return openHttpExternal(url);
 });
 
 // Lifecycle

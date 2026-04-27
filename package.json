@@ -4,7 +4,10 @@
   "description": "takawasi-platform all-in-one desktop app — split-screen services, TBA chat, terminal, CLI",
   "main": "dist/main/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "npm run build:ts && npm run build:renderer && node scripts/copy-renderer-assets.mjs",
+    "build:ts": "tsc -p tsconfig.json",
+    "build:renderer": "esbuild src/renderer/app.ts --bundle --platform=browser --target=chrome124 --format=iife --outfile=dist/renderer/app.js",
     "build:cli": "esbuild src/cli/index.ts --bundle --platform=node --target=node18 --outfile=dist/cli/index.js",
     "postinstall": "electron-rebuild",
     "dev": "npm run build && electron .",

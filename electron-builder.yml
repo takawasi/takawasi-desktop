@@ -22,6 +22,7 @@ extraResources:
       - "**/*"
 
 mac:
+  artifactName: Takawasi-Desktop-mac-${arch}.${ext}
   category: public.app-category.productivity
   target:
     - target: dmg
@@ -35,15 +36,14 @@ mac:
   identity: null
 
 win:
+  artifactName: Takawasi-Desktop-win-${arch}.${ext}
   target:
     - target: nsis
       arch:
         - x64
-    - target: portable
-      arch:
-        - x64
 
 linux:
+  artifactName: Takawasi-Desktop-linux-${arch}.${ext}
   target:
     - target: AppImage
       arch:

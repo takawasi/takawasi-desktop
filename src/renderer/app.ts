@@ -2,6 +2,9 @@
 // Runs in contextIsolation. Access to main via window.takawasi (contextBridge)
 // Types: see globals.d.ts
 
+import { Terminal } from 'xterm';
+import { FitAddon } from 'xterm-addon-fit';
+
 // ── Resizer ─────────────────────────────────────────────────────────────────
 
 function initResizers(): void {
@@ -148,6 +151,21 @@ function appendTbaMsg(type: 'user' | 'assistant' | 'stage', text: string): HTMLE
   return div;
 }
 
+function scrollTbaMessages(): void {
+  const messages = document.getElementById('tba-messages')!;
+  messages.scrollTop = messages.scrollHeight;
+}
+
+interface TbaSsePayload {
+  stage?: string;
+  text?: string;
+  final?: boolean;
+  code?: string;
+  message?: string;
+  turn_id?: string;
+  credits_used?: number;
+}
+
 async function sendTbaMessage(message: string): Promise<void> {
   if (tbaStreaming || !message.trim()) return;
   tbaStreaming = true;
@@ -158,85 +176,110 @@ async function sendTbaMessage(message: string): Promise<void> {
 
   appendTbaMsg('user', message);
 
-  const { cookieHeader, endpoint } = await window.takawasi.tba.streamInfo();
-
   const assistantDiv = appendTbaMsg('assistant', '');
   let accumulated = '';
+  let sseBuffer = '';
+  let finished = false;
+  const streamId = `tba-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-  try {
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(cookieHeader ? { 'Cookie': cookieHeader } : {}),
-      },
-      body: JSON.stringify({ message }),
-    });
-
-    if (!response.ok) {
-      assistantDiv.textContent = `エラー: HTTP ${response.status}`;
-      return;
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) {
-      assistantDiv.textContent = 'ストリームを取得できませんでした';
-      return;
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6).trim();
-          if (data === '[DONE]') continue;
-          try {
-            const parsed = JSON.parse(data) as {
-              type?: string;
-              stage?: number;
-              stage_name?: string;
-              content?: string;
-              delta?: string;
-            };
-            if (parsed.type === 'stage' || parsed.stage !== undefined) {
-              const stageName = parsed.stage_name || `段 ${parsed.stage}`;
-              stageLabel.textContent = stageName;
-              appendTbaMsg('stage', `[${stageName}]`);
-            } else if (parsed.content) {
-              accumulated += parsed.content;
-              assistantDiv.textContent = accumulated;
-              document.getElementById('tba-messages')!.scrollTop = document.getElementById('tba-messages')!.scrollHeight;
-            } else if (parsed.delta) {
-              accumulated += parsed.delta;
-              assistantDiv.textContent = accumulated;
-              document.getElementById('tba-messages')!.scrollTop = document.getElementById('tba-messages')!.scrollHeight;
-            }
-          } catch {
-            // plain text chunk
-            accumulated += data;
-            assistantDiv.textContent = accumulated;
-          }
-        }
-      }
-    }
-
+  function finish(): void {
+    if (finished) return;
+    finished = true;
+    window.takawasi.tba.removeListeners(streamId);
     stageLabel.textContent = '';
-    if (!accumulated) assistantDiv.textContent = '(応答なし)';
-  } catch (err) {
-    assistantDiv.textContent = `接続エラー: ${String(err)}`;
-    stageLabel.textContent = '';
-  } finally {
+    if (!accumulated && !assistantDiv.textContent.trim()) {
+      assistantDiv.textContent = '(応答なし)';
+    }
     tbaStreaming = false;
     sendBtn.disabled = false;
+  }
+
+  function handleSseEvent(eventName: string, rawData: string): void {
+    let payload: TbaSsePayload;
+    try {
+      payload = JSON.parse(rawData) as TbaSsePayload;
+    } catch {
+      accumulated += rawData;
+      assistantDiv.textContent = accumulated;
+      scrollTbaMessages();
+      return;
+    }
+
+    if (eventName === 'chunk') {
+      const stage = payload.stage || '';
+      const text = payload.text || '';
+      const finalSuffix = payload.final ? ' final' : '';
+      if (stage) stageLabel.textContent = `${stage}${finalSuffix}`;
+
+      if (stage && stage !== 'execute') {
+        appendTbaMsg('stage', `[${stage}${finalSuffix}] ${text}`);
+        return;
+      }
+
+      if (text) {
+        accumulated += text;
+        assistantDiv.textContent = accumulated;
+        scrollTbaMessages();
+      }
+      return;
+    }
+
+    if (eventName === 'done') {
+      const credits = typeof payload.credits_used === 'number' ? ` credits=${payload.credits_used}` : '';
+      appendTbaMsg('stage', `[done]${credits}`);
+      return;
+    }
+
+    if (eventName === 'error') {
+      const code = payload.code ? `${payload.code}: ` : '';
+      assistantDiv.textContent = `エラー: ${code}${payload.message || rawData}`;
+      scrollTbaMessages();
+    }
+  }
+
+  function parseSseBlock(block: string): void {
+    let eventName = 'message';
+    const dataLines: string[] = [];
+    for (const rawLine of block.split('\n')) {
+      if (!rawLine || rawLine.startsWith(':')) continue;
+      const colon = rawLine.indexOf(':');
+      const field = colon >= 0 ? rawLine.slice(0, colon) : rawLine;
+      let value = colon >= 0 ? rawLine.slice(colon + 1) : '';
+      if (value.startsWith(' ')) value = value.slice(1);
+      if (field === 'event') eventName = value;
+      if (field === 'data') dataLines.push(value);
+    }
+    if (dataLines.length > 0) {
+      handleSseEvent(eventName, dataLines.join('\n'));
+    }
+  }
+
+  function consumeSse(chunk: string): void {
+    sseBuffer = `${sseBuffer}${chunk}`.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const blocks = sseBuffer.split('\n\n');
+    sseBuffer = blocks.pop() || '';
+    for (const block of blocks) parseSseBlock(block);
+  }
+
+  window.takawasi.tba.onChunk(streamId, consumeSse);
+  window.takawasi.tba.onError(streamId, (err) => {
+    assistantDiv.textContent = `接続エラー: ${err.status ? `HTTP ${err.status}: ` : ''}${err.message}`;
+    scrollTbaMessages();
+  });
+  window.takawasi.tba.onEnd(streamId, () => {
+    if (sseBuffer.trim()) parseSseBlock(sseBuffer);
+    finish();
+  });
+
+  try {
+    const started = await window.takawasi.tba.start(streamId, message);
+    if (!started.ok) {
+      assistantDiv.textContent = `エラー: ${started.error || 'stream start failed'}`;
+      finish();
+    }
+  } catch (err) {
+    assistantDiv.textContent = `接続エラー: ${String(err)}`;
+    finish();
   }
 }
 
@@ -265,9 +308,11 @@ function initTba(): void {
 // ── LaunchPad (Phase D) ───────────────────────────────────────────────────────
 
 interface LPItem {
-  name: string;
-  type: string;
-  path: string;
+  service: string;
+  runId: string;
+  fileCount: number;
+  sizeBytes: number;
+  updatedAt?: string | null;
 }
 
 async function loadLaunchPad(): Promise<void> {
@@ -275,23 +320,25 @@ async function loadLaunchPad(): Promise<void> {
   list.innerHTML = '<div class="lp-placeholder">読み込み中...</div>';
 
   try {
-    const { cookieHeader } = await window.takawasi.launchpad.cookieHeader();
-    const res = await fetch('https://launchpad.takawasi-social.com/api/list', {
-      headers: cookieHeader ? { 'Cookie': cookieHeader } : {},
-      credentials: 'include',
-    });
-
-    if (res.status === 401) {
-      list.innerHTML = '<div class="lp-placeholder">ログインが必要です</div>';
-      return;
-    }
-    if (!res.ok) {
-      list.innerHTML = `<div class="lp-placeholder">エラー: HTTP ${res.status}</div>`;
+    const result = await window.takawasi.launchpad.list();
+    if (!result.ok || !result.data) {
+      list.innerHTML = `<div class="lp-placeholder">${escapeHtml(result.error || 'LaunchPad の読み込みに失敗しました')}</div>`;
       return;
     }
 
-    const data = await res.json() as { items?: LPItem[] };
-    const items: LPItem[] = data.items || [];
+    const items: LPItem[] = [];
+    for (const [service, artifacts] of Object.entries(result.data.artifacts || {})) {
+      for (const artifact of artifacts) {
+        items.push({
+          service,
+          runId: artifact.id,
+          fileCount: artifact.file_count,
+          sizeBytes: artifact.size_bytes,
+          updatedAt: artifact.updated_at,
+        });
+      }
+    }
+    items.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
 
     if (items.length === 0) {
       list.innerHTML = '<div class="lp-placeholder">生成物がありません</div>';
@@ -303,11 +350,12 @@ async function loadLaunchPad(): Promise<void> {
       const row = document.createElement('div');
       row.className = 'lp-item';
       row.innerHTML = `
-        <span class="lp-item-type">${escapeHtml(item.type || 'file')}</span>
-        <span class="lp-item-name">${escapeHtml(item.name)}</span>
-        <button class="lp-dl-btn" data-path="${escapeHtml(item.path)}">DL</button>
+        <span class="lp-item-type">${escapeHtml(item.service)}</span>
+        <span class="lp-item-name">${escapeHtml(item.runId)}</span>
+        <span class="lp-item-meta">${escapeHtml(formatArtifactMeta(item))}</span>
+        <button class="lp-dl-btn" data-service="${escapeHtml(item.service)}" data-run-id="${escapeHtml(item.runId)}">DL</button>
       `;
-      row.querySelector('.lp-dl-btn')!.addEventListener('click', () => downloadItem(item, cookieHeader));
+      row.querySelector('.lp-dl-btn')!.addEventListener('click', () => downloadItem(item));
       list.appendChild(row);
     }
   } catch (err) {
@@ -315,23 +363,25 @@ async function loadLaunchPad(): Promise<void> {
   }
 }
 
-async function downloadItem(item: LPItem, cookieHeader: string): Promise<void> {
+async function downloadItem(item: LPItem): Promise<void> {
   try {
-    const res = await fetch(`https://launchpad.takawasi-social.com/api/download?path=${encodeURIComponent(item.path)}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(cookieHeader ? { 'Cookie': cookieHeader } : {}),
-      },
-      credentials: 'include',
-    });
-    if (!res.ok) { alert(`DL エラー: HTTP ${res.status}`); return; }
-    const data = await res.json() as { url?: string; download_url?: string };
-    const url = data.url || data.download_url;
+    const result = await window.takawasi.launchpad.download(item.service, item.runId);
+    if (!result.ok || !result.data) {
+      alert(`DL エラー: ${result.error || 'LaunchPad MCP error'}`);
+      return;
+    }
+    const url = result.data.download_url;
     if (url) window.takawasi.shell.openExternal(url);
   } catch (err) {
     alert(`DL エラー: ${String(err)}`);
   }
+}
+
+function formatArtifactMeta(item: LPItem): string {
+  const size = item.sizeBytes >= 1024 * 1024
+    ? `${(item.sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(1, Math.ceil(item.sizeBytes / 1024))} KB`;
+  return `${item.fileCount} files / ${size}`;
 }
 
 function escapeHtml(s: string): string {
@@ -344,34 +394,10 @@ function initLaunchPad(): void {
 
 // ── Terminal (Phase C) ────────────────────────────────────────────────────────
 
-let termFitAddon: { fit: () => void } | null = null;
-
-interface XTermLike {
-  open: (el: HTMLElement) => void;
-  loadAddon: (addon: object) => void;
-  onData: (cb: (data: string) => void) => void;
-  write: (data: string) => void;
-  dispose: () => void;
-}
-interface FitAddonLike { fit: () => void; }
+let termFitAddon: FitAddon | null = null;
 
 async function initTerminal(): Promise<void> {
-  // In Electron renderer (file:// origin), we load xterm via script tags in HTML
-  // or use a typed require shim. The Terminal class is expected to be globally
-  // available from the xterm CSS/JS link in index.html, OR loaded via require.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const g = globalThis as unknown as Record<string, unknown>;
-  // Try global (if xterm was loaded via <script> tag), then skip gracefully
-  const TerminalClass = (g['Terminal'] as (new (opts: object) => XTermLike) | undefined);
-  const FitAddonClass = (g['FitAddon'] as (new () => FitAddonLike) | undefined);
-
-  if (!TerminalClass) {
-    const container = document.getElementById('terminal-container');
-    if (container) container.textContent = 'xterm.js を読み込めませんでした（開発モードでは npm run dev で起動してください）';
-    return;
-  }
-
-  const term: XTermLike = new TerminalClass({
+  const term = new Terminal({
     theme: {
       background: '#000000',
       foreground: '#e8e8f5',
@@ -382,11 +408,9 @@ async function initTerminal(): Promise<void> {
     cursorBlink: true,
   });
 
-  if (FitAddonClass) {
-    const fitAddon: FitAddonLike = new FitAddonClass();
-    term.loadAddon(fitAddon);
-    termFitAddon = fitAddon;
-  }
+  const fitAddon = new FitAddon();
+  term.loadAddon(fitAddon);
+  termFitAddon = fitAddon;
 
   const container = document.getElementById('terminal-container')!;
   term.open(container);

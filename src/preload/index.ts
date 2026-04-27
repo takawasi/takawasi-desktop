@@ -13,7 +13,22 @@ contextBridge.exposeInMainWorld('takawasi', {
   },
   // TBA
   tba: {
-    streamInfo: () => ipcRenderer.invoke('tba:streamInfo'),
+    start: (id: string, message: string) => ipcRenderer.invoke('tba:start', { id, message }),
+    cancel: (id: string) => ipcRenderer.invoke('tba:cancel', { id }),
+    onChunk: (id: string, cb: (chunk: string) => void) => {
+      ipcRenderer.on(`tba:chunk:${id}`, (_e, chunk) => cb(chunk));
+    },
+    onError: (id: string, cb: (data: { status?: number; message: string }) => void) => {
+      ipcRenderer.on(`tba:error:${id}`, (_e, data) => cb(data));
+    },
+    onEnd: (id: string, cb: () => void) => {
+      ipcRenderer.on(`tba:end:${id}`, () => cb());
+    },
+    removeListeners: (id: string) => {
+      ipcRenderer.removeAllListeners(`tba:chunk:${id}`);
+      ipcRenderer.removeAllListeners(`tba:error:${id}`);
+      ipcRenderer.removeAllListeners(`tba:end:${id}`);
+    },
   },
   // Terminal
   terminal: {
@@ -34,7 +49,8 @@ contextBridge.exposeInMainWorld('takawasi', {
   },
   // LaunchPad
   launchpad: {
-    cookieHeader: () => ipcRenderer.invoke('launchpad:cookieHeader'),
+    list: () => ipcRenderer.invoke('launchpad:list'),
+    download: (service: string, runId: string) => ipcRenderer.invoke('launchpad:download', { service, runId }),
   },
   // Shell
   shell: {

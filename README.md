@@ -10,9 +10,10 @@ takawasi-platform 全機能を1つのデスクトップアプリで。
 
 | OS | ファイル |
 |---|---|
-| macOS | `Takawasi-Desktop-mac.dmg` (Intel + Apple Silicon) |
-| Windows | `Takawasi-Desktop-win.exe` (NSIS installer) |
-| Linux | `Takawasi-Desktop-linux.AppImage` |
+| macOS Intel | `Takawasi-Desktop-mac-x64.dmg` |
+| macOS Apple Silicon | `Takawasi-Desktop-mac-arm64.dmg` |
+| Windows | `Takawasi-Desktop-win-x64.exe` (NSIS installer) |
+| Linux | `Takawasi-Desktop-linux-x64.AppImage` |
 
 ### 初回起動の注意 / First Launch
 
@@ -39,7 +40,7 @@ xattr -d com.apple.quarantine /Applications/Takawasi\ Desktop.app
 - ターミナル（xterm.js + node-pty、ネイティブシェル）
 - 同梱 CLI `takawasi-cli`（ターミナルから即実行可、PATH 自動追加）
 - 1回ログイン（CreditGate Cookie を全 WebView・全 API に共有）
-- LaunchPad 生成物一覧 + DL ボタン
+- LaunchPad 生成物一覧 + MCP 経由 DL ボタン
 
 ---
 
@@ -76,7 +77,7 @@ npm install
 # 開発実行
 npm run dev
 
-# 配布バイナリ生成
+# 配布バイナリ生成（release/ に Takawasi-Desktop-<os>-<arch>.* を出力）
 npm run dist          # 全OS
 npm run dist:mac      # mac のみ
 npm run dist:win      # Windows のみ
@@ -110,7 +111,7 @@ src/
   renderer/
     index.html       # メイン画面（4 panel + terminal）
     styles.css       # UI スタイル
-    app.ts           # renderer ロジック（分割画面・TBA SSE・LaunchPad・端末）
+    app.ts           # renderer ロジック（分割画面・IPC受信・端末）
   cli/index.ts       # takawasi-cli エントリポイント
 assets/              # アプリアイコン等
 electron-builder.yml # パッケージング設定
@@ -124,6 +125,7 @@ electron-builder.yml # パッケージング設定
 - **D. 内蔵 BrowserWindow OAuth**: Google OAuth を Electron 内で完結。deep link 不要。
 - **E. 自前 CSS Grid + マウスイベント**: 外部依存最小。4分割レイアウト程度なら十分。
 - **F. portal/promo/ja/tba.html 手本**: ダーク UI + accent blue で既存デザイン踏襲。
+- **API 経路**: TBA SSE と LaunchPad MCP は main process IPC 経由。renderer から Cookie header / cross-origin fetch は行わない。
 
 ---
 
@@ -132,8 +134,8 @@ electron-builder.yml # パッケージング設定
 1. GitHub に `takawasi/takawasi-desktop` public repo を作成
 2. `git remote add origin https://github.com/takawasi/takawasi-desktop.git`
 3. `git push -u origin main`
-4. `npm run dist` でバイナリ生成（`release/` ディレクトリに出力）
-5. GitHub Releases で tag `v0.1.0` を切り、各バイナリをアップロード
+4. tag `v0.1.0` を push
+5. `.github/workflows/release.yml` が各 OS バイナリを生成し、GitHub Releases にアップロード
 
 ---
 
